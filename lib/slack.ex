@@ -1,69 +1,74 @@
 defmodule Slack do
-  use Agent
+  use GenServer
 
-  def start_link do
-    Agent.start_link(fn -> :queue.new() end, name: __MODULE__)
+  def init(q) do
+    {:ok, q}
   end
 
-  defp add_to_queue(url, body) do
-    Agent.update(__MODULE__, fn q -> :queue.in(%{url: url, body: body}, q) end)
-  end
+  def handle_cast({:webhook}, [priority_queue, normal_queue]) do
+    case :queue.out(priority_queue) do
+      {{:value, head}, new_priority_queue} ->
+        webhook(head.url, head.body)
 
-  defp get_head do
-    Agent.get(__MODULE__, fn q ->
-      {{:value, head}, _} = :queue.out(q)
-      head
-    end)
-  end
-
-  defp remove_head do
-    Agent.update(__MODULE__, fn q ->
-      {_, new_queue} = :queue.out(q)
-      new_queue
-    end)
-  end
-
-  defp get_length do
-    Agent.get(__MODULE__, fn q -> :queue.len(q) end)
-  end
-
-  def add_message(url, body) do
-    add_to_queue(url, body)
-
-    if get_length() == 1 do
-      rate_limit()
-    end
-  end
-
-  def rate_limit do
-    if get_length() > 0 do
-      item = get_head()
-
-      case webhook(item.url, item.body) do
-        :success ->
+        if :queue.len(new_priority_queue) + :queue.len(normal_queue) > 0 do
           :timer.sleep(1000)
-          remove_head()
-          rate_limit()
-          :success
+          GenServer.cast(MyQueues, {:webhook})
+        end
 
-        # error code 429 supposedly triggers a 30 second timeout in Slack documentation
-        :too_many_requests ->
-          :timer.sleep(30000)
-          rate_limit()
+        {:noreply, [new_priority_queue, normal_queue]}
 
-        # malformed json or something
-        :bad_request -> 
-          remove_head()
-          rate_limit()
-          :bad_request
+      {:empty, _} ->
+        case :queue.out(normal_queue) do
+          {{:value, head}, new_normal_queue} ->
+            webhook(head.url, head.body)
 
-        other ->
-          other
-      end
+            if :queue.len(new_normal_queue) > 0 do
+              :timer.sleep(1000)
+              GenServer.cast(MyQueues, {:webhook})
+            end
+
+            {:noreply, [priority_queue, new_normal_queue]}
+
+          # do nothing
+          {:empty, empty_queue} ->
+            {:noreply, [priority_queue, empty_queue]}
+        end
     end
   end
 
-  def webhook(url, body) do
+  def handle_cast({:add, item}, [priority_queue, normal_queue]) do
+    new_state =
+      if item.priority == :high,
+        do: [:queue.in(item, priority_queue), normal_queue],
+        else: [priority_queue, :queue.in(item, normal_queue)]
+
+    [new_p, new_n] = new_state
+
+    if :queue.len(new_p) + :queue.len(new_n) > 0 do
+      GenServer.cast(MyQueues, {:webhook})
+    end
+
+    {:noreply, new_state}
+  end
+
+  def handle_info({:ok}, state) do
+    IO.puts(state)
+    {:noreply, state}
+  end
+
+  def start do
+    GenServer.start_link(__MODULE__, [:queue.new(), :queue.new()], name: MyQueues)
+  end
+
+  def send(url, body) do
+    GenServer.cast(MyQueues, {:add, %{url: url, body: body, priority: :normal}})
+  end
+
+  def send(url, body, :high_priority) do
+    GenServer.cast(MyQueues, {:add, %{url: url, body: body, priority: :high}})
+  end
+
+  defp webhook(url, body) do
     case :httpc.request(:post, {url, [], 'application/json', Jason.encode!(body)}, [], []) do
       {:ok, {{_, code, _}, _, _}} ->
         case code do
