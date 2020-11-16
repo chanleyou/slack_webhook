@@ -19,7 +19,7 @@ defmodule SlackTest do
 
   test "gen server" do
     url = Application.fetch_env!(:slack, :url)
-    Slack.start()
+    Slack.start_link()
     Slack.send(url, %{text: "Hello"})
     Slack.send(url, %{text: "1"})
     Slack.send(url, %{text: "2"})
