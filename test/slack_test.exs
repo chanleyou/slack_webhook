@@ -20,17 +20,14 @@ defmodule SlackTest do
   test "gen server" do
     url = Application.fetch_env!(:slack, :url)
     Slack.start_link()
-    Slack.send(url, %{text: "Hello"})
+    Slack.send(url, %{text: "Start!"})
     Slack.send(url, %{text: "1"})
     Slack.send(url, %{text: "2"})
     Slack.send(url, %{text: "3"})
     Slack.send(url, %{text: "4"})
     Slack.send(url, %{text: "5"})
-    Slack.send(url, %{text: "6"})
-    Slack.send(url, %{text: "7"})
-    Slack.send(url, %{text: "8"})
-    Slack.send(url, %{text: "9"})
-    Slack.send(url, %{text: "10"})
-    Slack.send(url, %{text: "High Priority!"}, :high_priority)
+    Slack.send(url, %{text: "High Priority!"}, priority: :high)
+
+    # Enum.each(1..400, fn(x) -> IO.puts("Slack.send(url, %{text: \"" <> to_string(x) <> "\"})") end)
   end
 end

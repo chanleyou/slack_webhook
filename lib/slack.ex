@@ -2,12 +2,22 @@ defmodule Slack do
   use GenServer
   @name __MODULE__
 
+  def start_link do
+    GenServer.start_link(@name, {:queue.new(), :queue.new()}, name: Slack)
+  end
+
   def init(q) do
     {:ok, q}
   end
 
-  def start_link do
-    GenServer.start_link(@name, {:queue.new(), :queue.new()}, name: Slack)
+  def send(url, body, opts \\ []) do
+    priority =
+      case Keyword.get(opts, :priority) do
+        :high -> :high
+        _ -> :normal
+      end
+
+    GenServer.cast(@name, {:add, %{url: url, body: body, priority: priority}})
   end
 
   def handle_cast({:add, item}, {priority, normal}) do
@@ -17,70 +27,52 @@ defmodule Slack do
         _ -> {priority, :queue.in(item, normal)}
       end
 
-    {new_priority, new_normal} = new_state
-
-    if :queue.len(new_priority) + :queue.len(new_normal) == 1 do
+    if :queue.peek(priority) == :empty && :queue.peek(normal) == :empty do
       Process.send(@name, :webhook, [])
     end
 
     {:noreply, new_state}
   end
 
-  def handle_info(:webhook, state) do
+  def handle_info(:webhook, {priority, normal}) do
     queue_message(state)
   end
 
-  def send(url, body) do
-    GenServer.cast(@name, {:add, %{url: url, body: body, priority: :normal}})
-  end
-
-  def send(url, body, :high_priority) do
-    GenServer.cast(@name, {:add, %{url: url, body: body, priority: :high}})
-  end
-
   defp queue_message({priority, normal}) do
-    case :queue.out(priority) do
-      {{:value, head}, new_priority} ->
+    case handle_queue(priority) do
+      {:ok, priority} ->
+        {:noreply, {priority, normal}}
+
+      :empty ->
+        case handle_queue(normal) do
+          {:ok, normal} -> {:noreply, {priority, normal}}
+          _ -> {:noreply, {priority, normal}}
+        end
+
+      _ ->
+        {:noreply, {priority, normal}}
+    end
+  end
+
+  defp handle_queue(queue) do
+    case :queue.out(queue) do
+      {{:value, head}, rest} ->
         case webhook(head.url, head.body) do
-          :success ->
-            if :queue.len(new_priority) > 0 || :queue.len(normal) > 0 do
-              Process.send_after(@name, :webhook, 1000)
-            end
+          :ok ->
+            Process.send(@name, :webhook, [])
+            {:ok, rest}
 
-            {:noreply, {new_priority, normal}}
-
-          {:too_many_requests, seconds} ->
+          {:wait, seconds} ->
             Process.send_after(@name, :webhook, seconds * 1000)
-            {:noreply, {priority, normal}}
+            {:ok, queue}
 
-          # todo: other error handling
+          # todo: error handling
           _ ->
-            {:noreply, {priority, normal}}
+            {:fail, queue}
         end
 
       {:empty, _} ->
-        case :queue.out(normal) do
-          {{:value, head}, new_normal} ->
-            case webhook(head.url, head.body) do
-              :success ->
-                if :queue.len(new_normal) > 0 do
-                  Process.send_after(@name, :webhook, 1000)
-                end
-
-                {:noreply, {priority, new_normal}}
-
-              {:too_many_requests, seconds} ->
-                Process.send_after(@name, :webhook, seconds * 1000)
-                {:noreply, {priority, normal}}
-
-              _ ->
-                {:noreply, {priority, normal}}
-            end
-
-          # do nothing
-          {:empty, empty_queue} ->
-            {:noreply, {priority, empty_queue}}
-        end
+        :empty
     end
   end
 
@@ -89,23 +81,23 @@ defmodule Slack do
       {:ok, {{_, code, _}, headers, _}} ->
         case code do
           200 ->
-            :success
+            :ok
+
+          429 ->
+            {_, timeout} = Enum.find(headers, fn h -> elem(h, 0) == 'retry-after' end)
+            {seconds, _} = :string.to_integer(timeout)
+            {:wait, seconds}
 
           # malformed JSON or something
           400 ->
             :bad_request
 
-          429 ->
-            {_(timeout)} = Enum.find(headers, fn h -> elem(h, 0) == 'retry-after' end)
-            {seconds, _} = Integer.parse(to_string(timeout))
-            {:too_many_requests, seconds}
-
           _ ->
-            :failure
+            :fail
         end
 
       _ ->
-        :failure
+        :fail
     end
   end
 end
